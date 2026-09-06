@@ -4,3 +4,4 @@ __pycache__/
 instance/
 static/uploads/*
 !static/uploads/.gitkeep
+node_modules/  android/  www/ 

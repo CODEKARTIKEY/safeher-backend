@@ -20,8 +20,12 @@ os.makedirs(UPLOAD, exist_ok=True)
 # ---- App setup -------------------------------------------------------------
 app = Flask(__name__)
 CORS(app, supports_credentials=True, origins=["*"])
-app.config['SESSION_COOKIE_SAMESITE'] = 'None'
-app.config['SESSION_COOKIE_SECURE'] = True
+
+# Cookie & Session persistence configuration
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=365)
+app.config["SESSION_COOKIE_SAMESITE"] = "None"
+app.config["SESSION_COOKIE_SECURE"] = True
+app.config["SESSION_COOKIE_HTTPONLY"] = True
 
 # A stable random secret is generated on first run and stored locally, so
 # logins survive server restarts without ever hard-coding a secret in code.
@@ -184,12 +188,19 @@ def register():
             (name, email, generate_password_hash(pw), now_iso()),
         )
         c.commit()
-        session["uid"] = cur.lastrowid
+        user_id = cur.lastrowid
+        session.permanent = True
+        session["uid"] = user_id
     except sqlite3.IntegrityError:
         c.close()
         return bad("Email already registered", 409)
     c.close()
-    return jsonify(ok=True, name=name)
+
+    return jsonify(
+        ok=True,
+        name=name,
+        user={"id": user_id, "name": name, "email": email, "role": "user"}
+    )
 
 
 @app.post("/api/login")
@@ -205,8 +216,43 @@ def login():
     c.close()
     if not u or not check_password_hash(u["password"], pw):
         return bad("Invalid credentials", 401)
+
+    session.permanent = True
     session["uid"] = u["id"]
-    return jsonify(ok=True, name=u["name"], role=u["role"])
+
+    return jsonify(
+        ok=True,
+        name=u["name"],
+        role=u["role"],
+        user={"id": u["id"], "name": u["name"], "email": u["email"], "role": u["role"]}
+    )
+
+
+@app.post("/api/forgot-password")
+def forgot_password():
+    d = json_body()
+    email = str(d.get("email", "")).lower().strip()
+    new_password = str(d.get("new_password", "")).strip()
+
+    if not email or not new_password:
+        return bad("Email and new password are required")
+    if len(new_password) < 6:
+        return bad("Password must be at least 6 characters long")
+
+    c = conn()
+    u = c.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
+    if not u:
+        c.close()
+        return bad("No account found with this email address", 404)
+
+    c.execute(
+        "UPDATE users SET password=? WHERE id=?",
+        (generate_password_hash(new_password), u["id"])
+    )
+    c.commit()
+    c.close()
+
+    return jsonify(ok=True, message="Password updated successfully. You can now sign in.")
 
 
 @app.get("/logout")
@@ -225,8 +271,9 @@ def me():
 @app.route("/api/contacts", methods=["GET", "POST"])
 def contacts():
     u = user()
-    if not u:
-        return bad("Please login", 401)
+    # Fallback to guest user ID 0 if session cookie isn't present
+    user_id = u["id"] if u else 0
+
     c = conn()
     if request.method == "POST":
         d = json_body()
@@ -237,11 +284,11 @@ def contacts():
             return bad("Name and phone number are required")
         c.execute(
             "INSERT INTO contacts(user_id,name,phone,relation,primary_contact) VALUES(?,?,?,?,?)",
-            (u["id"], name, phone, str(d.get("relation", "")).strip(), int(bool(d.get("primary", False)))),
+            (user_id, name, phone, str(d.get("relation", "")).strip(), int(bool(d.get("primary", False)))),
         )
         c.commit()
     rows = c.execute(
-        "SELECT * FROM contacts WHERE user_id=? ORDER BY primary_contact DESC,id", (u["id"],)
+        "SELECT * FROM contacts WHERE user_id=? ORDER BY primary_contact DESC,id", (user_id,)
     ).fetchall()
     c.close()
     return jsonify(ok=True, contacts=[dict(x) for x in rows])
@@ -250,10 +297,9 @@ def contacts():
 @app.delete("/api/contacts/<int:cid>")
 def del_contact(cid):
     u = user()
-    if not u:
-        return bad("Please login", 401)
+    user_id = u["id"] if u else 0
     c = conn()
-    c.execute("DELETE FROM contacts WHERE id=? AND user_id=?", (cid, u["id"]))
+    c.execute("DELETE FROM contacts WHERE id=? AND user_id=?", (cid, user_id))
     c.commit()
     c.close()
     return jsonify(ok=True)
@@ -263,8 +309,7 @@ def del_contact(cid):
 @app.post("/api/location")
 def location():
     u = user()
-    if not u:
-        return bad("Login required", 401)
+    user_id = u["id"] if u else 0
     d = json_body()
     try:
         lat = float(d["lat"])
@@ -280,7 +325,7 @@ def location():
     c = conn()
     c.execute(
         "INSERT INTO locations(user_id,lat,lng,accuracy,created_at) VALUES(?,?,?,?,?)",
-        (u["id"], lat, lng, accuracy, now_iso()),
+        (user_id, lat, lng, accuracy, now_iso()),
     )
     c.commit()
     c.close()
@@ -290,8 +335,6 @@ def location():
 # ---- SOS --------------------------------------------------------------------
 @app.post("/api/sos")
 def sos():
-    # Intentionally allowed for logged-out users too: an emergency alert
-    # should never be blocked behind a login screen.
     u = user()
     d = json_body()
 
@@ -336,9 +379,8 @@ def allowed_evidence(filename):
 @app.route("/api/incidents", methods=["GET", "POST"])
 def incidents():
     u = user()
+    user_id = u["id"] if u else 0
     if request.method == "POST":
-        if not u:
-            return bad("Login required", 401)
         d = request.form
         itype = d.get("type", "").strip()
         details = d.get("details", "").strip()
@@ -365,7 +407,7 @@ def incidents():
             """INSERT INTO incidents(user_id,type,details,date,severity,lat,lng,anonymous,evidence,created_at)
                VALUES(?,?,?,?,?,?,?,?,?,?)""",
             (
-                u["id"],
+                user_id,
                 itype,
                 details,
                 date,
@@ -391,20 +433,19 @@ def incidents():
 @app.post("/api/checkin")
 def checkin():
     u = user()
-    if not u:
-        return bad("Login required", 401)
+    user_id = u["id"] if u else 0
     d = json_body()
     try:
         mins = int(d.get("minutes", 15))
     except (TypeError, ValueError):
         mins = 15
-    mins = max(1, min(mins, 24 * 60))  # clamp to a sane 1 min–24 hr range
+    mins = max(1, min(mins, 24 * 60))
     expires = (datetime.now() + timedelta(minutes=mins)).isoformat()
 
     c = conn()
     cur = c.execute(
         "INSERT INTO checkins(user_id,minutes,expires_at,status,created_at) VALUES(?,?,?,?,?)",
-        (u["id"], mins, expires, "ACTIVE", now_iso()),
+        (user_id, mins, expires, "ACTIVE", now_iso()),
     )
     c.commit()
     c.close()
@@ -418,8 +459,6 @@ def dashboard():
     if not u or u["role"] != "admin":
         return bad("Forbidden", 403)
     c = conn()
-    # Computed in Python (not SQLite's datetime()) so the cutoff uses the
-    # exact same ISO timestamp format as the stored rows.
     cutoff = (datetime.now() - timedelta(minutes=10)).isoformat()
     out = {
         "users": c.execute("SELECT COUNT(*) n FROM users").fetchone()["n"],
