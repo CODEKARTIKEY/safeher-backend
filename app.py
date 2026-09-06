@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime, timedelta
 
 from flask import Flask, render_template, request, jsonify, session, redirect
+from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 
@@ -18,6 +19,9 @@ os.makedirs(UPLOAD, exist_ok=True)
 
 # ---- App setup -------------------------------------------------------------
 app = Flask(__name__)
+CORS(app, supports_credentials=True, origins=["*"])
+app.config['SESSION_COOKIE_SAMESITE'] = 'None'
+app.config['SESSION_COOKIE_SECURE'] = True
 
 # A stable random secret is generated on first run and stored locally, so
 # logins survive server restarts without ever hard-coding a secret in code.
