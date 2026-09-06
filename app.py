@@ -255,10 +255,10 @@ def forgot_password():
     return jsonify(ok=True, message="Password updated successfully. You can now sign in.")
 
 
-@app.get("/logout")
-def logout():
+@app.route("/api/logout", methods=["POST", "GET"])
+def api_logout():
     session.clear()
-    return redirect("/")
+    return jsonify(ok=True, message="Logged out successfully")
 
 
 @app.get("/api/me")
