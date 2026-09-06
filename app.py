@@ -206,17 +206,16 @@ def register():
 @app.post("/api/login")
 def login():
     d = json_body()
-    email = str(d.get("email", "")).lower().strip()
-    pw = str(d.get("password", ""))
-    if not email or not pw:
-        return bad("Enter your email and password", 401)
+    email = str(d.get("email", "")).strip().lower()
+password = str(d.get("password", ""))
 
-    c = conn()
-    u = c.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
-    c.close()
-    if not u or not check_password_hash(u["password"], pw):
-        return bad("Invalid credentials", 401)
+c = conn()
 
+u = c.execute("SELECT * FROM users WHERE LOWER(email) = ?", (email,)).fetchone()
+c.close()
+
+if not u or not check_password_hash(u["password"], password):
+    return bad("Invalid credentials", 401)
     session.permanent = True
     session["uid"] = u["id"]
 
